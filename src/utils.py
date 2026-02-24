@@ -63,27 +63,70 @@ def prepare_vacancy_data(vacancy: Dict[str, Any], employer_id: int) -> Dict[str,
     """
     salary = parse_salary(vacancy.get('salary'))
 
+    # Получаем описание из разных возможных полей
+    description = ''
+    if vacancy.get('snippet'):
+        description = vacancy['snippet'].get('responsibility', '')
+    elif vacancy.get('description'):
+        description = vacancy['description']
+
     return {
         'id': vacancy['id'],
         'employer_id': employer_id,
         'name': vacancy['name'],
-        'description': vacancy.get('snippet', {}).get('responsibility', ''),
+        'description': description,
         'salary': salary,
         'url': vacancy.get('alternate_url', ''),
         'published_at': vacancy.get('published_at', '')
     }
 
 
-# Список ID интересных компаний для сбора данных
+# Актуальные ID компаний на hh.ru (проверенные)
 EMPLOYER_IDS = [
-    1740,   # Яндекс
-    3529,   # Сбер
-    78638,  # Тинькофф
-    3776,   # Mail.ru Group
-    8554,   # Газпром нефть
-    80,     # Альфа-Банк
-    87021,  # Wildberries
-    1122462,# Ozon
-    633,    # Ростелеком
-    15478   # VK
+    1455,    # Яндекс
+    3529,    # Сбер
+    3776,    # VK (бывший Mail.ru)
+    633,     # Ростелеком
+    2180,    # Ozon
+    87021,   # Wildberries
+    78638,   # Тинькофф
+    8554,    # Газпром нефть
+    80,      # Альфа-Банк
+    15478    # VK (дополнительный)
 ]
+
+# Альтернативный вариант - искать компании по названию
+def search_companies_by_name(api_client, company_names: List[str]) -> List[Dict]:
+    """
+    Поиск компаний по названию.
+
+    Args:
+        api_client: Экземпляр HeadHunterAPI
+        company_names: Список названий компаний
+
+    Returns:
+        List[Dict]: Найденные компании
+    """
+    found_companies = []
+
+    for name in company_names:
+        try:
+            response = api_client.session.get(
+                f'{api_client.BASE_URL}employers',
+                params={'text': name, 'only_with_vacancies': True}
+            )
+
+            if response.status_code == 200:
+                items = response.json().get('items', [])
+                if items:
+                    # Берем первую найденную компанию
+                    company = items[0]
+                    found_companies.append(company)
+                    print(f"Найдена компания '{name}': ID {company['id']}")
+                else:
+                    print(f"Компания '{name}' не найдена")
+
+        except Exception as e:
+            print(f"Ошибка при поиске компании {name}: {e}")
+
+    return found_companies

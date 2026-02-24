@@ -35,3 +35,19 @@ class Config:
             'host': self.db_host,
             'port': self.db_port
         }
+
+    def get_postgres_params(self) -> Dict[str, str]:
+        """
+        Возвращает параметры подключения к стандартной БД postgres
+        (для создания новой базы данных).
+
+        Returns:
+            Dict[str, str]: Словарь с параметрами подключения
+        """
+        return {
+            'dbname': 'postgres',
+            'user': self.db_user,
+            'password': self.db_password,
+            'host': self.db_host,
+            'port': self.db_port
+        }

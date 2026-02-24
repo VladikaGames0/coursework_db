@@ -4,7 +4,7 @@
 """
 
 import psycopg2
-from psycopg2.extras import execute_values
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from typing import List, Dict, Any, Optional
 from src.config import Config
 
@@ -22,18 +22,60 @@ class DBManager:
         self.config = config
         self.conn = None
 
-    def connect(self):
-        """Установка соединения с базой данных."""
+    def connect(self, database: str = None):
+        """
+        Установка соединения с базой данных.
+
+        Args:
+            database: Имя базы данных (если None, использует из конфига)
+        """
+        params = self.config.get_db_params()
+        if database:
+            params['dbname'] = database
+
         if not self.conn or self.conn.closed:
-            self.conn = psycopg2.connect(**self.config.get_db_params())
+            self.conn = psycopg2.connect(**params)
 
     def close(self):
         """Закрытие соединения с базой данных."""
         if self.conn and not self.conn.closed:
             self.conn.close()
 
+    def create_database(self):
+        """
+        Создание базы данных, если она не существует.
+        """
+        # Подключаемся к стандартной БД postgres
+        conn = None
+        try:
+            conn = psycopg2.connect(**self.config.get_postgres_params())
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            cursor = conn.cursor()
+
+            # Проверяем существование базы данных
+            cursor.execute("SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s",
+                         (self.config.db_name,))
+            exists = cursor.fetchone()
+
+            if not exists:
+                cursor.execute(f'CREATE DATABASE {self.config.db_name}')
+                print(f"✅ База данных {self.config.db_name} успешно создана")
+            else:
+                print(f"ℹ️ База данных {self.config.db_name} уже существует")
+
+            cursor.close()
+        except Exception as e:
+            print(f"❌ Ошибка при создании базы данных: {e}")
+        finally:
+            if conn and not conn.closed:
+                conn.close()
+
     def create_tables(self):
         """Создание таблиц в базе данных."""
+        # Сначала убеждаемся, что база данных существует
+        self.create_database()
+
+        # Подключаемся к созданной БД
         self.connect()
         cursor = self.conn.cursor()
 
@@ -65,14 +107,96 @@ class DBManager:
                 )
             """)
 
+            # Создание индексов для улучшения производительности
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_vacancies_employer 
+                ON vacancies(employer_id)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_vacancies_salary 
+                ON vacancies(salary)
+            """)
+
             self.conn.commit()
-            print("Таблицы успешно созданы")
+            print("✅ Таблицы успешно созданы")
 
         except Exception as e:
-            print(f"Ошибка при создании таблиц: {e}")
+            print(f"❌ Ошибка при создании таблиц: {e}")
             self.conn.rollback()
         finally:
             cursor.close()
+
+    def drop_tables(self):
+        """Удаление таблиц (для очистки БД)."""
+        self.connect()
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute("DROP TABLE IF EXISTS vacancies CASCADE")
+            cursor.execute("DROP TABLE IF EXISTS employers CASCADE")
+            self.conn.commit()
+            print("✅ Таблицы успешно удалены")
+        except Exception as e:
+            print(f"❌ Ошибка при удалении таблиц: {e}")
+            self.conn.rollback()
+        finally:
+            cursor.close()
+
+    def drop_database(self):
+        """
+        Удаление базы данных (осторожно!).
+        """
+        # Закрываем все соединения с нашей БД
+        self.close()
+
+        conn = None
+        try:
+            conn = psycopg2.connect(**self.config.get_postgres_params())
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            cursor = conn.cursor()
+
+            # Завершаем все соединения с нашей БД
+            cursor.execute("""
+                SELECT pg_terminate_backend(pg_stat_activity.pid)
+                FROM pg_stat_activity
+                WHERE pg_stat_activity.datname = %s
+                AND pid <> pg_backend_pid()
+            """, (self.config.db_name,))
+
+            # Удаляем базу данных
+            cursor.execute(f'DROP DATABASE IF EXISTS {self.config.db_name}')
+            print(f"✅ База данных {self.config.db_name} успешно удалена")
+
+            cursor.close()
+        except Exception as e:
+            print(f"❌ Ошибка при удалении базы данных: {e}")
+        finally:
+            if conn and not conn.closed:
+                conn.close()
+
+    def database_exists(self) -> bool:
+        """
+        Проверка существования базы данных.
+
+        Returns:
+            bool: True если база данных существует
+        """
+        conn = None
+        try:
+            conn = psycopg2.connect(**self.config.get_postgres_params())
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s",
+                         (self.config.db_name,))
+            exists = cursor.fetchone() is not None
+            cursor.close()
+            return exists
+        except Exception as e:
+            print(f"❌ Ошибка при проверке базы данных: {e}")
+            return False
+        finally:
+            if conn and not conn.closed:
+                conn.close()
 
     def insert_employers(self, employers_data: List[Dict[str, Any]]):
         """
@@ -105,10 +229,10 @@ class DBManager:
                 ))
 
             self.conn.commit()
-            print(f"Успешно добавлено/обновлено {len(employers_data)} работодателей")
+            print(f"✅ Успешно добавлено/обновлено {len(employers_data)} работодателей")
 
         except Exception as e:
-            print(f"Ошибка при вставке работодателей: {e}")
+            print(f"❌ Ошибка при вставке работодателей: {e}")
             self.conn.rollback()
         finally:
             cursor.close()
@@ -145,10 +269,10 @@ class DBManager:
                 ))
 
             self.conn.commit()
-            print(f"Успешно добавлено/обновлено {len(vacancies_data)} вакансий")
+            print(f"✅ Успешно добавлено/обновлено {len(vacancies_data)} вакансий")
 
         except Exception as e:
-            print(f"Ошибка при вставке вакансий: {e}")
+            print(f"❌ Ошибка при вставке вакансий: {e}")
             self.conn.rollback()
         finally:
             cursor.close()
@@ -176,7 +300,7 @@ class DBManager:
             return [{'company': row[0], 'count': row[1]} for row in results]
 
         except Exception as e:
-            print(f"Ошибка при получении данных: {e}")
+            print(f"❌ Ошибка при получении данных: {e}")
             return []
         finally:
             cursor.close()
@@ -216,7 +340,7 @@ class DBManager:
             ]
 
         except Exception as e:
-            print(f"Ошибка при получении данных: {e}")
+            print(f"❌ Ошибка при получении данных: {e}")
             return []
         finally:
             cursor.close()
@@ -242,7 +366,7 @@ class DBManager:
             return round(result[0], 2) if result[0] else 0
 
         except Exception as e:
-            print(f"Ошибка при получении средней зарплаты: {e}")
+            print(f"❌ Ошибка при получении средней зарплаты: {e}")
             return 0
         finally:
             cursor.close()
@@ -282,7 +406,7 @@ class DBManager:
             ]
 
         except Exception as e:
-            print(f"Ошибка при получении данных: {e}")
+            print(f"❌ Ошибка при получении данных: {e}")
             return []
         finally:
             cursor.close()
@@ -325,7 +449,83 @@ class DBManager:
             ]
 
         except Exception as e:
-            print(f"Ошибка при получении данных: {e}")
+            print(f"❌ Ошибка при получении данных: {e}")
+            return []
+        finally:
+            cursor.close()
+
+    def execute_query(self, query: str, params: tuple = None) -> List[tuple]:
+        """
+        Выполняет произвольный SQL запрос и возвращает результаты.
+
+        Args:
+            query: SQL запрос
+            params: Параметры запроса
+
+        Returns:
+            List[tuple]: Результаты запроса
+        """
+        self.connect()
+        cursor = self.conn.cursor()
+
+        try:
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+
+            if query.strip().upper().startswith('SELECT'):
+                results = cursor.fetchall()
+                return results
+            else:
+                self.conn.commit()
+                return []
+
+        except Exception as e:
+            print(f"❌ Ошибка при выполнении запроса: {e}")
+            self.conn.rollback()
+            return []
+        finally:
+            cursor.close()
+
+    def get_table_info(self, table_name: str) -> List[Dict[str, Any]]:
+        """
+        Получает информацию о структуре таблицы.
+
+        Args:
+            table_name: Имя таблицы
+
+        Returns:
+            List[Dict[str, Any]]: Информация о колонках таблицы
+        """
+        self.connect()
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute("""
+                SELECT 
+                    column_name,
+                    data_type,
+                    is_nullable,
+                    column_default
+                FROM information_schema.columns
+                WHERE table_name = %s
+                ORDER BY ordinal_position
+            """, (table_name,))
+
+            results = cursor.fetchall()
+            return [
+                {
+                    'column': row[0],
+                    'type': row[1],
+                    'nullable': row[2],
+                    'default': row[3]
+                }
+                for row in results
+            ]
+
+        except Exception as e:
+            print(f"❌ Ошибка при получении информации о таблице: {e}")
             return []
         finally:
             cursor.close()
